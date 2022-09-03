@@ -59,7 +59,7 @@ def cache(
                 return ret
 
             if request.method != "GET":
-                return await func(request, *args, **kwargs)
+                return await func(*args, **kwargs)
             if_none_match = request.headers.get("if-none-match")
             if ret is not None:
                 if response:
