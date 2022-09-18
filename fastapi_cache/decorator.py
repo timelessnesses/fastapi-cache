@@ -1,13 +1,13 @@
-import asyncio
-from functools import wraps, partial
 import inspect
-from typing import TYPE_CHECKING, Callable, Optional, Type
+from functools import wraps
+from typing import Callable, Optional, Type
+
+from fastapi.concurrency import run_in_threadpool
+from starlette.requests import Request
+from starlette.responses import Response
 
 from fastapi_cache import FastAPICache
 from fastapi_cache.coder import Coder
-
-if TYPE_CHECKING:
-    import concurrent.futures
 
 
 def cache(
@@ -15,7 +15,6 @@ def cache(
     coder: Type[Coder] = None,
     key_builder: Callable = None,
     namespace: Optional[str] = "",
-    executor: Optional["concurrent.futures.Executor"] = None,
 ):
     """
     cache all function
@@ -23,12 +22,41 @@ def cache(
     :param expire:
     :param coder:
     :param key_builder:
-    :param executor:
 
     :return:
     """
 
     def wrapper(func):
+        signature = inspect.signature(func)
+        request_param = next(
+            (param for param in signature.parameters.values() if param.annotation is Request),
+            None,
+        )
+        response_param = next(
+            (param for param in signature.parameters.values() if param.annotation is Response),
+            None,
+        )
+        parameters = [*signature.parameters.values()]
+        if not request_param:
+            parameters.append(
+                inspect.Parameter(
+                    name="request",
+                    annotation=Request,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                ),
+            )
+        if not response_param:
+            parameters.append(
+                inspect.Parameter(
+                    name="response",
+                    annotation=Response,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                ),
+            )
+        if parameters:
+            signature = signature.replace(parameters=parameters)
+        func.__signature__ = signature
+
         @wraps(func)
         async def inner(*args, **kwargs):
             nonlocal coder
@@ -70,12 +98,14 @@ def cache(
                         return response
                     response.headers["ETag"] = etag
                 return coder.decode(ret)
-
+            if not request_param:
+                kwargs.pop("request")
+            if not response_param:
+                kwargs.pop("response")
             if inspect.iscoroutinefunction(func):
                 ret = await func(*args, **kwargs)
             else:
-                loop = asyncio.get_event_loop()
-                ret = await loop.run_in_executor(executor, partial(func, *args, **kwargs))
+                ret = await run_in_threadpool(func, *args, **kwargs)
 
             await backend.set(cache_key, coder.encode(ret), expire or FastAPICache.get_expire())
             return ret
